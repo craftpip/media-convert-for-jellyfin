@@ -289,8 +289,8 @@ if __name__ == "__main__":
     log_path = Path(args.log_file).expanduser().resolve() if args.log_file else None
     setup_logging(log_path, args.verbose)
 
-    if args.max_br:
-        MAX_BR = args.max_br
+    if args.bitrate:
+        MAX_BR = args.bitrate
         TARGET_BR = MAX_BR - BITRATE_TOLERANCE
         BUFSIZE = MAX_BR * 2
 
