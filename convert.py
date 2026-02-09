@@ -219,23 +219,7 @@ def convert_if_needed(file: Path):
 
     if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
         try:
-            if tmp.exists():parser = argparse.ArgumentParser()
-parser.add_argument(
-    "--max-br",
-    type=int,
-    help="Override max video bitrate (kbps)"
-)
-
-args = parser.parse_args()
-
-if args.max_br:
-    MAX_BR = args.max_br
-    TARGET_BR = MAX_BR - BITRATE_TOLERANCE
-    BUFSIZE = MAX_BR * 2
-else:
-    MAX_BR = DEFAULT_MAX_BR
-    TARGET_BR = DEFAULT_TARGET_BR
-    BUFSIZE = DEFAULT_BUFSIZE
+            if tmp.exists():
                 tmp.unlink()
         except Exception:
             pass
