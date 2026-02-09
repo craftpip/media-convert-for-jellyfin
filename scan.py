@@ -1,3 +1,4 @@
+import sys
 import os
 import json
 import subprocess
@@ -87,9 +88,19 @@ def scan(root: Path):
 
 
 if __name__ == "__main__":
-    import sys
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--bitrate",
+        type=int,
+        help="Override max video bitrate (kbps)"
+    )
+    parser.add_argument("dir", nargs="?", default=".", help="Directory to scan recursively")
+   
     root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").expanduser().resolve()
+    
+    if args.bitrate:
+        MAX_BR = args.bitrate
+        TARGET_BR = MAX_BR - BITRATE_TOLERANCE
 
     if not root.is_dir():
         print(f"Not a directory: {root}")
