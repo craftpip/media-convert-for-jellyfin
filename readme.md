@@ -13,8 +13,8 @@ Both scripts share the **same decision logic**, so the scanner output exactly ma
 ## Usage
 
 ```bash 
-python r.py path_to_dir # scan and convert the files.
-python s.py path_to_dir # scan for files only
+python convert.py path_to_dir # scan and convert the files.
+python scan.py path_to_dir # scan for files only
 ```
 
 ---
@@ -45,7 +45,7 @@ ffmpeg -version
 ffprobe -version
 ```
 
-Configure this in the files.
+Configure this in the .env file
 ```python
 TARGET_BR = 3000      # kbps
 MAX_BR = 3300         # kbps
