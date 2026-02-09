@@ -2,10 +2,13 @@ import os
 import json
 import subprocess
 from pathlib import Path
+from dotenv import load_dotenv
 
-BITRATE_TOLERANCE = 300  # kbps
-TARGET_BR = 3000
-MAX_BR = 3300
+load_dotenv()  # loads .env from current directory
+
+BITRATE_TOLERANCE = int(os.getenv("BITRATE_TOLERANCE", 300))
+TARGET_BR = int(os.getenv("TARGET_BR", 3000))
+MAX_BR = int(os.getenv("MAX_BR", 3300))
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".webm", ".ts", ".flv", ".wmv"}
 H264_OK_CONTAINERS = {".mkv", ".mp4", ".mov", ".ts", ".flv", ".avi"}

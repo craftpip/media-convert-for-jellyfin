@@ -6,11 +6,14 @@ import argparse
 import subprocess
 import logging
 from pathlib import Path
+from dotenv import load_dotenv
 
-BITRATE_TOLERANCE = 300  # kbps
-TARGET_BR = 3000  # kbps
-MAX_BR = 3300     # kbps
-BUFSIZE = 6000    # kbps
+load_dotenv()  # loads .env from current directory
+
+BITRATE_TOLERANCE = int(os.getenv("BITRATE_TOLERANCE", 300))
+TARGET_BR = int(os.getenv("TARGET_BR", 3000))
+MAX_BR = int(os.getenv("MAX_BR", 3300))
+BUFSIZE = int(os.getenv("BUFSIZE", 6000))
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".webm", ".ts", ".flv", ".wmv"}
 TMP_TAG = ".__transcoding__"  # temp name keeps same container (ext at end)
