@@ -12,7 +12,7 @@ load_dotenv()  # loads .env from current directory
 
 BITRATE_TOLERANCE = int(os.getenv("BITRATE_TOLERANCE", 300))
 TARGET_BR = int(os.getenv("TARGET_BR", 3000))
-MAX_BR = int(os.getenv("MAX_BR", 3300))
+MAXB_BR = int(os.getenv("MAX_BR", 3300))
 BUFSIZE = int(os.getenv("BUFSIZE", 6000))
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".webm", ".ts", ".flv", ".wmv"}
@@ -219,7 +219,23 @@ def convert_if_needed(file: Path):
 
     if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
         try:
-            if tmp.exists():
+            if tmp.exists():parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--max-br",
+    type=int,
+    help="Override max video bitrate (kbps)"
+)
+
+args = parser.parse_args()
+
+if args.max_br:
+    MAX_BR = args.max_br
+    TARGET_BR = MAX_BR - BITRATE_TOLERANCE
+    BUFSIZE = MAX_BR * 2
+else:
+    MAX_BR = DEFAULT_MAX_BR
+    TARGET_BR = DEFAULT_TARGET_BR
+    BUFSIZE = DEFAULT_BUFSIZE
                 tmp.unlink()
         except Exception:
             pass
@@ -276,6 +292,11 @@ def main(scan_dir: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--bitrate",
+        type=int,
+        help="Override max video bitrate (kbps)"
+    )
     parser.add_argument("dir", nargs="?", default=".", help="Directory to scan recursively")
     parser.add_argument("--log-file", default="", help="Path to log file (optional)")
     parser.add_argument("--verbose", action="store_true", help="More logs (debug)")
@@ -283,6 +304,11 @@ if __name__ == "__main__":
 
     log_path = Path(args.log_file).expanduser().resolve() if args.log_file else None
     setup_logging(log_path, args.verbose)
+
+    if args.max_br:
+        MAX_BR = args.max_br
+        TARGET_BR = MAX_BR - BITRATE_TOLERANCE
+        BUFSIZE = MAX_BR * 2
 
     try:
         main(args.dir)
