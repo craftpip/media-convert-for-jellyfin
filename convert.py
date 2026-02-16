@@ -27,22 +27,26 @@ TEXT_SUB_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text"}
 log = logging.getLogger("transcode")
 
 
-def load_done() -> set[str]:
+def load_done() -> dict[str, str]:
     if not DONE_FILE.exists():
-        return set()
-    entries = set()
+        return {}
+    entries = {}
     for line in DONE_FILE.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        entries.add(line)
+        if "|" not in line:
+            continue
+        path, opt = line.split("|", 1)
+        entries[path] = opt
     return entries
 
 
-def append_done(key: str) -> None:
+def save_done(done: dict[str, str]) -> None:
     DONE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with DONE_FILE.open("a", encoding="utf-8") as f:
-        f.write(key + "\n")
+    with DONE_FILE.open("w", encoding="utf-8") as f:
+        for path, opt in done.items():
+            f.write(f"{path}|{opt}\n")
 
 
 def setup_logging(log_file: Path | None, verbose: bool):
@@ -287,7 +291,7 @@ def main(scan_dir: str, crf: int | None = None):
     log.info(f"Scanning: {root}")
     cleanup_tmp_files(root)
 
-    done_set = load_done()
+    done = load_done()
 
     files = []
     for p in root.rglob("*"):
@@ -299,8 +303,11 @@ def main(scan_dir: str, crf: int | None = None):
 
     ok = skip = fail = 0
     for i, f in enumerate(files, 1):
-        key = f"{f.resolve().as_posix()}|{'crf' if crf else 'br'}:{crf if crf else str(TARGET_BR)}"
-        if key in done_set:
+        path = f.resolve().as_posix()
+        current_opt = f"crf:{crf}" if crf else f"br:{TARGET_BR}"
+        key = f"{path}|{current_opt}"
+
+        if done.get(path) == current_opt:
             skip += 1
             log.info(f"[{i}/{total}] SKIP: {f} :: already_done")
             continue
@@ -309,8 +316,8 @@ def main(scan_dir: str, crf: int | None = None):
         status, msg = convert_if_needed(f, crf)
         if status == "OK":
             ok += 1
-            append_done(key)
-            done_set.add(key)
+            done[path] = current_opt
+            save_done(done)
             log.info(f"[{i}/{total}] OK: {f} :: {msg}")
         elif status == "SKIP":
             skip += 1
