@@ -1,0 +1,1 @@
+/home/boniface/space/media-convert-for-jellyfin/test_files/Fallout.2024.S01E01.1080p.WEB.h264-ETHEL.mkv|crf:23
