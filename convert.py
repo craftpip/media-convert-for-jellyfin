@@ -15,6 +15,7 @@ TARGET_BR = int(os.getenv("TARGET_BR", 3000))
 MAX_BR = int(os.getenv("MAX_BR", 3300))
 BUFSIZE = int(os.getenv("BUFSIZE", 6000))
 DEFAULT_CRF = int(os.getenv("DEFAULT_CRF", 23))
+TRANSCODER = 'h264_nvenc'
 
 DONE_FILE = Path(__file__).parent / "done.txt"
 
@@ -194,7 +195,7 @@ def build_ffmpeg_cmd(in_file: Path, out_file: Path, crf: int | None = None):
 
     if crf is not None:
         cmd += [
-            "-c:v", "h264_nvenc",
+            "-c:v", f"{TRANSCODER}",
             "-preset", "p4",
             "-profile:v", "high",
             "-crf", str(crf),
@@ -204,7 +205,7 @@ def build_ffmpeg_cmd(in_file: Path, out_file: Path, crf: int | None = None):
         ]
     else:
         cmd += [
-            "-c:v", "h264_nvenc",
+            "-c:v", f"{TRANSCODER}",
             "-preset", "p4",
             "-profile:v", "high",
             "-b:v", f"{TARGET_BR}k",
@@ -343,6 +344,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("dir", nargs="?", default=".", help="Directory to scan recursively")
     parser.add_argument("--log-file", default="", help="Path to log file (optional)")
+    parser.add_argument("--use", default="nvidia", help="More logs (debug)")
     parser.add_argument("--verbose", action="store_true", help="More logs (debug)")
     args = parser.parse_args()
 
@@ -355,6 +357,18 @@ if __name__ == "__main__":
         BUFSIZE = MAX_BR * 2
 
     crf = args.crf if args.crf else None
+
+    if args.use:
+        if args.use == 'nvidiagpu':
+            TRANSCODER = 'h264_nvenc'
+        if args.use == 'amdgpu':
+            TRANSCODER = 'h264_amf'
+        if args.use == 'intel':
+            TRANSCODER = 'hevc_qsv'
+        if args.use == 'cpu':
+            TRANSCODER = 'libx265'
+
+    print(f'Using transcoder: {TRANSCODER}')
 
     try:
         main(args.dir, crf)
