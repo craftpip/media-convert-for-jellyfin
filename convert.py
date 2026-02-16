@@ -12,8 +12,11 @@ load_dotenv()  # loads .env from current directory
 
 BITRATE_TOLERANCE = int(os.getenv("BITRATE_TOLERANCE", 300))
 TARGET_BR = int(os.getenv("TARGET_BR", 3000))
-MAXB_BR = int(os.getenv("MAX_BR", 3300))
+MAX_BR = int(os.getenv("MAX_BR", 3300))
 BUFSIZE = int(os.getenv("BUFSIZE", 6000))
+DEFAULT_CRF = int(os.getenv("DEFAULT_CRF", 23))
+
+DONE_FILE = Path(__file__).parent / "done.txt"
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".webm", ".ts", ".flv", ".wmv"}
 TMP_TAG = ".__transcoding__"  # temp name keeps same container (ext at end)
@@ -22,6 +25,24 @@ H264_OK_CONTAINERS = {".mkv", ".mp4", ".mov", ".ts", ".flv", ".avi"}
 TEXT_SUB_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text"}
 
 log = logging.getLogger("transcode")
+
+
+def load_done() -> set[str]:
+    if not DONE_FILE.exists():
+        return set()
+    entries = set()
+    for line in DONE_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        entries.add(line)
+    return entries
+
+
+def append_done(key: str) -> None:
+    DONE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with DONE_FILE.open("a", encoding="utf-8") as f:
+        f.write(key + "\n")
 
 
 def setup_logging(log_file: Path | None, verbose: bool):
@@ -135,7 +156,7 @@ def safe_replace(src: Path, dst: Path):
     return False
 
 
-def build_ffmpeg_cmd(in_file: Path, out_file: Path):
+def build_ffmpeg_cmd(in_file: Path, out_file: Path, crf: int | None = None):
     ext = in_file.suffix.lower()
 
     streams = probe_streams(in_file)
@@ -165,16 +186,30 @@ def build_ffmpeg_cmd(in_file: Path, out_file: Path):
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(in_file),
         *maps,
-        "-c:v", "h264_nvenc",
-        "-preset", "p4",
-        "-profile:v", "high",
-        "-b:v", f"{TARGET_BR}k",
-        "-maxrate", f"{MAX_BR}k",
-        "-bufsize", f"{BUFSIZE}k",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "copy",
-        "-max_muxing_queue_size", "1024",
     ]
+
+    if crf is not None:
+        cmd += [
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-profile:v", "high",
+            "-crf", str(crf),
+            "-pix_fmt", "yuv420p",
+            "-c:a", "copy",
+            "-max_muxing_queue_size", "1024",
+        ]
+    else:
+        cmd += [
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-profile:v", "high",
+            "-b:v", f"{TARGET_BR}k",
+            "-maxrate", f"{MAX_BR}k",
+            "-bufsize", f"{BUFSIZE}k",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "copy",
+            "-max_muxing_queue_size", "1024",
+        ]
 
     if sub_mode == "copy":
         cmd += ["-c:s", "copy"]
@@ -187,7 +222,7 @@ def build_ffmpeg_cmd(in_file: Path, out_file: Path):
     return cmd, None
 
 
-def convert_if_needed(file: Path):
+def convert_if_needed(file: Path, crf: int | None = None):
     ext = file.suffix.lower()
 
     if ext not in H264_OK_CONTAINERS:
@@ -195,11 +230,13 @@ def convert_if_needed(file: Path):
 
     br = get_estimated_bitrate_kbps(file)
     log.info(f"Bitrate: {br} kbps")
-    if br is None:
-        return "SKIP", "bitrate_unknown"
 
-    if br <= MAX_BR + BITRATE_TOLERANCE:
-        return "SKIP", f"ok({br}kbps)"
+    if crf is None:
+        if br is None:
+            return "SKIP", "bitrate_unknown"
+
+        if br <= MAX_BR + BITRATE_TOLERANCE:
+            return "SKIP", f"ok({br}kbps)"
 
     tmp = tmp_name_for(file)
 
@@ -209,7 +246,7 @@ def convert_if_needed(file: Path):
         except Exception:
             return "FAIL", "tmp_cleanup_failed"
 
-    cmd, err = build_ffmpeg_cmd(file, tmp)
+    cmd, err = build_ffmpeg_cmd(file, tmp, crf)
     if err:
         return "FAIL", err
     if not cmd:
@@ -233,10 +270,11 @@ def convert_if_needed(file: Path):
             pass
         return "FAIL", "replace_failed"
 
-    return "OK", f"converted({br}kbps)"
+    mode = f"crf({crf})" if crf is not None else f"converted({br}kbps)"
+    return "OK", mode
 
 
-def main(scan_dir: str):
+def main(scan_dir: str, crf: int | None = None):
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         log.error("FATAL: ffmpeg/ffprobe not found in PATH")
         return
@@ -249,6 +287,8 @@ def main(scan_dir: str):
     log.info(f"Scanning: {root}")
     cleanup_tmp_files(root)
 
+    done_set = load_done()
+
     files = []
     for p in root.rglob("*"):
         if p.is_file() and p.suffix.lower() in VIDEO_EXTS and TMP_TAG not in p.name:
@@ -259,10 +299,18 @@ def main(scan_dir: str):
 
     ok = skip = fail = 0
     for i, f in enumerate(files, 1):
+        key = f"{f.resolve().as_posix()}|{'crf' if crf else 'br'}:{crf if crf else str(TARGET_BR)}"
+        if key in done_set:
+            skip += 1
+            log.info(f"[{i}/{total}] SKIP: {f} :: already_done")
+            continue
+
         log.info(f"[{i}/{total}] Checking: {f}")
-        status, msg = convert_if_needed(f)
+        status, msg = convert_if_needed(f, crf)
         if status == "OK":
             ok += 1
+            append_done(key)
+            done_set.add(key)
             log.info(f"[{i}/{total}] OK: {f} :: {msg}")
         elif status == "SKIP":
             skip += 1
@@ -281,6 +329,11 @@ if __name__ == "__main__":
         type=int,
         help="Override max video bitrate (kbps)"
     )
+    parser.add_argument(
+        "--crf",
+        type=int,
+        help="Use CRF mode with this value (lower = better quality, 23 is default)"
+    )
     parser.add_argument("dir", nargs="?", default=".", help="Directory to scan recursively")
     parser.add_argument("--log-file", default="", help="Path to log file (optional)")
     parser.add_argument("--verbose", action="store_true", help="More logs (debug)")
@@ -294,7 +347,9 @@ if __name__ == "__main__":
         TARGET_BR = MAX_BR - BITRATE_TOLERANCE
         BUFSIZE = MAX_BR * 2
 
+    crf = args.crf if args.crf else None
+
     try:
-        main(args.dir)
+        main(args.dir, crf)
     except KeyboardInterrupt:
         log.warning("Interrupted.")
