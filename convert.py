@@ -28,6 +28,11 @@ TMP_TAG = ".__transcoding__"  # temp name keeps same container (ext at end)
 
 H264_OK_CONTAINERS = {".mkv", ".mp4", ".mov", ".ts", ".flv", ".avi"}
 TEXT_SUB_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text"}
+ALLOWED_AUDIO_LANGS = {
+    "eng", "en", "english",
+    "jpn", "ja", "japanese",
+    "hin", "hi", "hindi",
+}
 
 log = logging.getLogger("transcode")
 
@@ -245,7 +250,7 @@ def get_estimated_bitrate_kbps(file):
 
 
 def probe_streams(file):
-    data = ffprobe_json(file, "stream=index,codec_type,codec_name")
+    data = ffprobe_json(file, "stream=index,codec_type,codec_name:stream_tags=language")
     if not data or "streams" not in data:
         return None
 
@@ -259,7 +264,9 @@ def probe_streams(file):
         if st == "video":
             vids.append(idx)
         elif st == "audio":
-            auds.append(idx)
+            tags = s.get("tags") or {}
+            lang = (tags.get("language") or "und").strip().lower()
+            auds.append((idx, lang))
         elif st == "subtitle":
             subs.append((idx, codec))
     return vids, auds, subs
@@ -308,8 +315,9 @@ def build_ffmpeg_cmd(in_file: Path, out_file: Path, crf: int | None = None):
     maps = []
     for i in vids:
         maps += ["-map", f"0:{i}"]
-    for i in auds:
-        maps += ["-map", f"0:{i}"]
+    for i, lang in auds:
+        if lang in ALLOWED_AUDIO_LANGS:
+            maps += ["-map", f"0:{i}"]
 
     sub_mode = "none"
     if ext == ".mkv":
@@ -343,7 +351,8 @@ def build_ffmpeg_cmd(in_file: Path, out_file: Path, crf: int | None = None):
         cmd += [
             "-c:v", f"{TRANSCODER}",
             "-crf", str(crf),
-            "-c:a", "copy",
+            "-c:a", "aac",
+            "-ac:a", "2",
             "-max_muxing_queue_size", "1024",
         ]
     else:
@@ -352,7 +361,8 @@ def build_ffmpeg_cmd(in_file: Path, out_file: Path, crf: int | None = None):
             "-b:v", f"{TARGET_BR}k",
             "-maxrate", f"{MAX_BR}k",
             "-bufsize", f"{BUFSIZE}k",
-            "-c:a", "copy",
+            "-c:a", "aac",
+            "-ac:a", "2",
             "-max_muxing_queue_size", "1024",
         ]
 
