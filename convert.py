@@ -22,7 +22,7 @@ FFPROBE_CMD = "ffprobe"
 AVAILABLE_ENCODERS: set[str] | None = None
 
 DONE_FILE = Path(__file__).parent / "done.txt"
-SIZE_REPORT_FILE = Path(__file__).parent / "size-report.txt"
+SIZE_REPORT_FILE = Path(__file__).parent / "size-report.csv"
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".webm", ".ts", ".flv", ".wmv"}
 TMP_TAG = ".__transcoding__"  # temp name keeps same container (ext at end)
