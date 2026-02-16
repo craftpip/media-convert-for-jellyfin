@@ -22,6 +22,7 @@ FFPROBE_CMD = "ffprobe"
 AVAILABLE_ENCODERS: set[str] | None = None
 
 DONE_FILE = Path(__file__).parent / "done.txt"
+SIZE_REPORT_FILE = Path(__file__).parent / "size-report.txt"
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".webm", ".ts", ".flv", ".wmv"}
 TMP_TAG = ".__transcoding__"  # temp name keeps same container (ext at end)
@@ -188,6 +189,21 @@ def save_done(done: dict[str, str]) -> None:
     with DONE_FILE.open("w", encoding="utf-8") as f:
         for path, opt in done.items():
             f.write(f"{path}|{opt}\n")
+
+
+def append_size_report(rows: list[tuple[str, int, int]]) -> None:
+    if not rows:
+        return
+
+    need_header = True
+    if SIZE_REPORT_FILE.exists() and SIZE_REPORT_FILE.stat().st_size > 0:
+        need_header = False
+
+    with SIZE_REPORT_FILE.open("a", encoding="utf-8") as f:
+        if need_header:
+            f.write("name,before,after\n")
+        for name, before, after in rows:
+            f.write(f"{name},{before},{after}\n")
 
 
 def setup_logging(log_file: Path | None, verbose: bool):
@@ -381,17 +397,17 @@ def convert_if_needed(file: Path, crf: int | None = None):
     ext = file.suffix.lower()
 
     if ext not in H264_OK_CONTAINERS:
-        return "SKIP", f"container_not_h264_ok({ext})"
+        return "SKIP", f"container_not_h264_ok({ext})", None
 
     br = get_estimated_bitrate_kbps(file)
     log.info(f"Bitrate: {br} kbps")
 
     if crf is None:
         if br is None:
-            return "SKIP", "bitrate_unknown"
+            return "SKIP", "bitrate_unknown", None
 
         if br <= MAX_BR + BITRATE_TOLERANCE:
-            return "SKIP", f"ok({br}kbps)"
+            return "SKIP", f"ok({br}kbps)", None
 
     tmp = tmp_name_for(file)
 
@@ -399,27 +415,29 @@ def convert_if_needed(file: Path, crf: int | None = None):
         try:
             tmp.unlink()
         except Exception:
-            return "FAIL", "tmp_cleanup_failed"
+            return "FAIL", "tmp_cleanup_failed", None
 
     cmd, err = build_ffmpeg_cmd(file, tmp, crf)
     if err:
-        return "FAIL", err
+        return "FAIL", err, None
     if not cmd:
-        return "FAIL", "cmd_build_failed"
+        return "FAIL", "cmd_build_failed", None
     if log.isEnabledFor(logging.DEBUG):
         log.info(f"Command: {' '.join(cmd)}")
 
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as e:
-        return "FAIL", f"ffmpeg_failed: {e.stderr}"
+        return "FAIL", f"ffmpeg_failed: {e.stderr}", None
     if not tmp.exists() or tmp.stat().st_size == 0:
         try:
             if tmp.exists():
                 tmp.unlink()
         except Exception:
             pass
-        return "FAIL", "ffmpeg_failed"
+        return "FAIL", "ffmpeg_failed", None
+
+    before_size = file.stat().st_size
 
     if not safe_replace(tmp, file):
         try:
@@ -427,10 +445,12 @@ def convert_if_needed(file: Path, crf: int | None = None):
                 tmp.unlink()
         except Exception:
             pass
-        return "FAIL", "replace_failed"
+        return "FAIL", "replace_failed", None
+
+    after_size = file.stat().st_size
 
     mode = f"crf({crf})" if crf is not None else f"converted({br}kbps)"
-    return "OK", mode
+    return "OK", mode, (file.name, before_size, after_size)
 
 
 def main(scan_dir: str, crf: int | None = None):
@@ -457,6 +477,7 @@ def main(scan_dir: str, crf: int | None = None):
     log.info(f"Found {total} file(s)")
 
     ok = skip = fail = 0
+    size_rows: list[tuple[str, int, int]] = []
     for i, f in enumerate(files, 1):
         path = f.resolve().as_posix()
         current_opt = f"crf:{crf}" if crf else f"br:{TARGET_BR}"
@@ -468,11 +489,13 @@ def main(scan_dir: str, crf: int | None = None):
             continue
 
         log.info(f"[{i}/{total}] Checking: {f}")
-        status, msg = convert_if_needed(f, crf)
+        status, msg, size_row = convert_if_needed(f, crf)
         if status == "OK":
             ok += 1
             done[path] = current_opt
             save_done(done)
+            if size_row:
+                size_rows.append(size_row)
             log.info(f"[{i}/{total}] OK: {f} :: {msg}")
         elif status == "SKIP":
             skip += 1
@@ -481,6 +504,7 @@ def main(scan_dir: str, crf: int | None = None):
             fail += 1
             log.error(f"[{i}/{total}] FAIL: {f} :: {msg}")
 
+    append_size_report(size_rows)
     log.info(f"Done. OK={ok} SKIP={skip} FAIL={fail}")
 
 
