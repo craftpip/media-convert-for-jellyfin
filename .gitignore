@@ -2,3 +2,5 @@
 # placed at repository root
 **/test_files/*
 !**/test_files/.gitkeep
+done.txt
+__pycache__/

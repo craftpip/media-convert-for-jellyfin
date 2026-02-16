@@ -15,7 +15,11 @@ TARGET_BR = int(os.getenv("TARGET_BR", 3000))
 MAX_BR = int(os.getenv("MAX_BR", 3300))
 BUFSIZE = int(os.getenv("BUFSIZE", 6000))
 DEFAULT_CRF = int(os.getenv("DEFAULT_CRF", 23))
-TRANSCODER = 'h264_nvenc'
+TRANSCODER = "h264_nvenc"
+TRANSCODER_PROFILE = "nvidia"
+FFMPEG_CMD = "ffmpeg"
+FFPROBE_CMD = "ffprobe"
+AVAILABLE_ENCODERS: set[str] | None = None
 
 DONE_FILE = Path(__file__).parent / "done.txt"
 
@@ -26,6 +30,137 @@ H264_OK_CONTAINERS = {".mkv", ".mp4", ".mov", ".ts", ".flv", ".avi"}
 TEXT_SUB_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text"}
 
 log = logging.getLogger("transcode")
+
+TRANSCODER_ALIASES = {
+    "nvidia": "nvidia",
+    "nvidiagpu": "nvidia",
+    "nvenc": "nvidia",
+    "h264_nvenc": "nvidia",
+    "amdgpu": "amdgpu",
+    "amd": "amdgpu",
+    "amf": "amdgpu",
+    "h264_amf": "amdgpu",
+    "intel": "intel",
+    "intelgpu": "intel",
+    "qsv": "intel",
+    "h264_qsv": "intel",
+    "hevc_qsv": "intel",
+    "cpu": "cpu",
+    "software": "cpu",
+    "x264": "cpu",
+    "libx264": "cpu",
+    "x265": "cpu",
+    "libx265": "cpu",
+    "vaapi": "vaapi",
+    "h264_vaapi": "vaapi",
+}
+
+TRANSCODER_ENCODERS = {
+    "nvidia": "h264_nvenc",
+    "amdgpu": "h264_amf",
+    "intel": "h264_qsv",
+    "cpu": "libx264",
+    "vaapi": "h264_vaapi",
+}
+
+
+def _is_executable(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def _discover_binary(prefix: str, env_var: str, exact_names: tuple[str, ...]) -> str | None:
+    override = os.getenv(env_var, "").strip()
+    if override:
+        candidate = Path(override).expanduser()
+        if candidate.is_absolute():
+            return str(candidate) if _is_executable(candidate) else None
+        resolved = shutil.which(override)
+        if resolved:
+            return resolved
+
+    for name in exact_names:
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
+
+    path_dirs = [Path(p) for p in os.getenv("PATH", "").split(os.pathsep) if p]
+    discovered = []
+    for d in path_dirs:
+        if not d.is_dir():
+            continue
+        try:
+            for item in d.iterdir():
+                low = item.name.lower()
+                if not low.startswith(prefix):
+                    continue
+                if _is_executable(item):
+                    discovered.append(item)
+        except Exception:
+            continue
+
+    if not discovered:
+        return None
+
+    discovered.sort(key=lambda p: (len(p.name), p.name))
+    return str(discovered[0])
+
+
+def resolve_ffmpeg_tools() -> bool:
+    global FFMPEG_CMD, FFPROBE_CMD
+
+    ffmpeg = _discover_binary("ffmpeg", "FFMPEG_BIN", ("ffmpeg", "ffmpeg.exe"))
+    ffprobe = _discover_binary("ffprobe", "FFPROBE_BIN", ("ffprobe", "ffprobe.exe"))
+    if not ffmpeg or not ffprobe:
+        return False
+
+    FFMPEG_CMD = ffmpeg
+    FFPROBE_CMD = ffprobe
+    return True
+
+
+def get_available_encoders() -> set[str]:
+    global AVAILABLE_ENCODERS
+    if AVAILABLE_ENCODERS is not None:
+        return AVAILABLE_ENCODERS
+
+    cmd = [FFMPEG_CMD, "-hide_banner", "-encoders"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    encoders: set[str] = set()
+    if r.returncode == 0:
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if not line or line.startswith("-") or line.startswith("Encoders:"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                encoders.add(parts[1].lower())
+    AVAILABLE_ENCODERS = encoders
+    return AVAILABLE_ENCODERS
+
+
+def resolve_transcoder(use_value: str):
+    global TRANSCODER, TRANSCODER_PROFILE
+
+    requested = (use_value or "nvidia").strip().lower()
+    profile = TRANSCODER_ALIASES.get(requested)
+    encoders = get_available_encoders()
+
+    if profile:
+        encoder = TRANSCODER_ENCODERS[profile]
+        if encoder not in encoders:
+            return False, f"encoder_not_supported({encoder})"
+        TRANSCODER = encoder
+        TRANSCODER_PROFILE = profile
+        return True, None
+
+    # Allow passing a raw ffmpeg encoder name directly (e.g. --use h264_nvenc).
+    if requested in encoders:
+        TRANSCODER = requested
+        TRANSCODER_PROFILE = "custom"
+        return True, None
+
+    supported = ", ".join(sorted(TRANSCODER_ENCODERS.keys()))
+    return False, f"unknown_transcoder({requested}); valid profiles: {supported}"
 
 
 def load_done() -> dict[str, str]:
@@ -76,7 +211,7 @@ def run_quiet(cmd):
 
 
 def ffprobe_json(file, entries):
-    cmd = ["ffprobe", "-v", "error", "-show_entries", entries, "-of", "json", str(file)]
+    cmd = [FFPROBE_CMD, "-v", "error", "-show_entries", entries, "-of", "json", str(file)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0 or not r.stdout.strip():
         return None
@@ -188,37 +323,21 @@ def build_ffmpeg_cmd(in_file: Path, out_file: Path, crf: int | None = None):
         sub_mode = "mov_text"
 
     cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        FFMPEG_CMD, "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(in_file),
         *maps,
     ]
 
-    if TRANSCODER == 'nvidia':
-        cmd += [
-            "-preset", "p4",
-            "-pix_fmt", "yuv420p",
-        ]
-    if TRANSCODER == 'amdgpu':
-        cmd += [
-            "-usage","transcoding",
-            "-quality", "balanced",
-            "-pix_fmt", "yuv420p",
-        ]
-    if TRANSCODER == 'intel':
-        cmd += [
-            "-preset", "medium",
-            "-pix_fmt", "yuv420p",
-        ]
-    if TRANSCODER == 'cpu':
-        cmd += [
-            "-preset", "medium",
-            "-pix_fmt", "yuv420p",
-        ]     
-    if TRANSCODER == 'h264_vaapi':
-        cmd += [
-            "-vaapi_device", "/dev/dri/renderD128",
-            "-vf", "format=nv12,hwupload"
-        ]
+    if TRANSCODER_PROFILE == "nvidia":
+        cmd += ["-preset", "p4", "-pix_fmt", "yuv420p"]
+    elif TRANSCODER_PROFILE == "amdgpu":
+        cmd += ["-usage", "transcoding", "-quality", "balanced", "-pix_fmt", "yuv420p"]
+    elif TRANSCODER_PROFILE == "intel":
+        cmd += ["-preset", "medium", "-pix_fmt", "yuv420p"]
+    elif TRANSCODER_PROFILE == "cpu":
+        cmd += ["-preset", "medium", "-pix_fmt", "yuv420p"]
+    elif TRANSCODER_PROFILE == "vaapi" or TRANSCODER.endswith("_vaapi"):
+        cmd += ["-vaapi_device", "/dev/dri/renderD128", "-vf", "format=nv12,hwupload"]
 
     if crf is not None:
         cmd += [
@@ -273,12 +392,12 @@ def convert_if_needed(file: Path, crf: int | None = None):
             return "FAIL", "tmp_cleanup_failed"
 
     cmd, err = build_ffmpeg_cmd(file, tmp, crf)
-    if args.verbose:
-        log.info(f"Command: {' '.join(cmd)}")
     if err:
         return "FAIL", err
     if not cmd:
         return "FAIL", "cmd_build_failed"
+    if log.isEnabledFor(logging.DEBUG):
+        log.info(f"Command: {' '.join(cmd)}")
 
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -305,7 +424,7 @@ def convert_if_needed(file: Path, crf: int | None = None):
 
 
 def main(scan_dir: str, crf: int | None = None):
-    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+    if not resolve_ffmpeg_tools():
         log.error("FATAL: ffmpeg/ffprobe not found in PATH")
         return
 
@@ -369,7 +488,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("dir", nargs="?", default=".", help="Directory to scan recursively")
     parser.add_argument("--log-file", default="", help="Path to log file (optional)")
-    parser.add_argument("--use", default="nvidia", help="More logs (debug)")
+    parser.add_argument("--use", default="nvidia", help="Transcoder profile or ffmpeg encoder name")
     parser.add_argument("--verbose", action="store_true", help="More logs (debug)")
     args = parser.parse_args()
 
@@ -383,19 +502,16 @@ if __name__ == "__main__":
 
     crf = args.crf if args.crf else None
 
-    if args.use:
-        if args.use == 'nvidiagpu':
-            TRANSCODER = 'h264_nvenc'
-        if args.use == 'amdgpu':
-            TRANSCODER = 'h264_amf'
-        if args.use == 'intel':
-            TRANSCODER = 'hevc_qsv'
-        if args.use == 'cpu':
-            TRANSCODER = 'libx265'
-        if args.use == 'vaapi':
-            TRANSCODER = 'h264_vaapi'
+    if not resolve_ffmpeg_tools():
+        log.error("FATAL: ffmpeg/ffprobe not found in PATH")
+        raise SystemExit(1)
 
-    print(f'Using transcoder: {TRANSCODER}')
+    ok, err = resolve_transcoder(args.use)
+    if not ok:
+        log.error(f"FATAL: {err}")
+        raise SystemExit(1)
+
+    print(f"Using transcoder: {TRANSCODER} (profile: {TRANSCODER_PROFILE})")
 
     try:
         main(args.dir, crf)
@@ -403,5 +519,4 @@ if __name__ == "__main__":
         print(f"\nError: {str(e)}")
     except Exception as e:
         print(f"\nError: {str(e)}")
-        print(f"\nFFmpeg command failed. Full error output:\n{subprocess.run(cmd, capture_output=True, text=True, check=True).stderr}")
-        log.warning("Interrupted.")
+        log.exception("Unhandled exception")
