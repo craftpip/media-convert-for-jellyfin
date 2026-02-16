@@ -1,0 +1,4 @@
+# ignore all files in this directory except .gitkeep
+# placed at repository root
+**/test_files/*
+!**/test_files/.gitkeep
