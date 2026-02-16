@@ -193,25 +193,46 @@ def build_ffmpeg_cmd(in_file: Path, out_file: Path, crf: int | None = None):
         *maps,
     ]
 
+    if TRANSCODER == 'nvidia':
+        cmd += [
+            "-preset", "p4",
+            "-pix_fmt", "yuv420p",
+        ]
+    if TRANSCODER == 'amdgpu':
+        cmd += [
+            "-usage","transcoding",
+            "-quality", "balanced",
+            "-pix_fmt", "yuv420p",
+        ]
+    if TRANSCODER == 'intel':
+        cmd += [
+            "-preset", "medium",
+            "-pix_fmt", "yuv420p",
+        ]
+    if TRANSCODER == 'cpu':
+        cmd += [
+            "-preset", "medium",
+            "-pix_fmt", "yuv420p",
+        ]     
+    if TRANSCODER == 'h264_vaapi':
+        cmd += [
+            "-vaapi_device", "/dev/dri/renderD128",
+            "-vf", "format=nv12,hwupload"
+        ]
+
     if crf is not None:
         cmd += [
             "-c:v", f"{TRANSCODER}",
-            "-preset", "p4",
-            "-profile:v", "high",
             "-crf", str(crf),
-            "-pix_fmt", "yuv420p",
             "-c:a", "copy",
             "-max_muxing_queue_size", "1024",
         ]
     else:
         cmd += [
             "-c:v", f"{TRANSCODER}",
-            "-preset", "p4",
-            "-profile:v", "high",
             "-b:v", f"{TARGET_BR}k",
             "-maxrate", f"{MAX_BR}k",
             "-bufsize", f"{BUFSIZE}k",
-            "-pix_fmt", "yuv420p",
             "-c:a", "copy",
             "-max_muxing_queue_size", "1024",
         ]
@@ -252,14 +273,18 @@ def convert_if_needed(file: Path, crf: int | None = None):
             return "FAIL", "tmp_cleanup_failed"
 
     cmd, err = build_ffmpeg_cmd(file, tmp, crf)
+    if args.verbose:
+        log.info(f"Command: {' '.join(cmd)}")
     if err:
         return "FAIL", err
     if not cmd:
         return "FAIL", "cmd_build_failed"
 
-    r = run_quiet(cmd)
-
-    if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError as e:
+        return "FAIL", f"ffmpeg_failed: {e.stderr}"
+    if not tmp.exists() or tmp.stat().st_size == 0:
         try:
             if tmp.exists():
                 tmp.unlink()
@@ -367,10 +392,16 @@ if __name__ == "__main__":
             TRANSCODER = 'hevc_qsv'
         if args.use == 'cpu':
             TRANSCODER = 'libx265'
+        if args.use == 'vaapi':
+            TRANSCODER = 'h264_vaapi'
 
     print(f'Using transcoder: {TRANSCODER}')
 
     try:
         main(args.dir, crf)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as e:
+        print(f"\nError: {str(e)}")
+    except Exception as e:
+        print(f"\nError: {str(e)}")
+        print(f"\nFFmpeg command failed. Full error output:\n{subprocess.run(cmd, capture_output=True, text=True, check=True).stderr}")
         log.warning("Interrupted.")
