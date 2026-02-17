@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import subprocess
+import argparse
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -55,36 +56,62 @@ def get_estimated_bitrate_kbps(file: Path):
         return None
 
 
-def should_convert(file: Path):
+def get_audio_track_channels(file: Path):
+    data = ffprobe_json(file, "stream=index,codec_type,channels")
+    if not data:
+        return []
+
+    channels = []
+    for stream in data.get("streams", []):
+        if stream.get("codec_type") != "audio":
+            continue
+        ch = stream.get("channels")
+        try:
+            channels.append(int(ch))
+        except (TypeError, ValueError):
+            channels.append(None)
+    return channels
+
+
+def should_report(file: Path, max_bitrate_kbps: int):
     ext = file.suffix.lower()
 
     if ext not in VIDEO_EXTS:
-        return False, "not_video"
+        return False, None, []
 
     if TMP_TAG in file.name:
-        return False, "temp_file"
-
-    if ext not in H264_OK_CONTAINERS:
-        return False, f"container_not_ok({ext})"
+        return False, None, []
 
     br = get_estimated_bitrate_kbps(file)
-    if br is None:
-        return False, "bitrate_unknown"
+    audio_channels = get_audio_track_channels(file)
 
-    if br <= MAX_BR + BITRATE_TOLERANCE:
-        return False, f"ok({br}kbps)"
+    high_bitrate = br is not None and br > max_bitrate_kbps
+    has_multichannel_audio = any(ch is not None and ch > 2 for ch in audio_channels)
 
-    return True, f"convert({br}kbps)"
+    return high_bitrate or has_multichannel_audio, br, audio_channels
 
 
-def scan(root: Path):
+def format_size(num_bytes: int):
+    mib = num_bytes / (1024 * 1024)
+    return f"{num_bytes}B ({mib:.2f}MiB)"
+
+
+def scan(root: Path, max_bitrate_kbps: int):
     for p in root.rglob("*"):
         if not p.is_file():
             continue
 
-        yes, reason = should_convert(p)
+        yes, bitrate_kbps, audio_channels = should_report(p, max_bitrate_kbps)
         if yes:
-            print(f"{p}  ->  {reason}")
+            tracks_text = ", ".join(f"{c}ch" if c is not None else "unknown" for c in audio_channels)
+            if not tracks_text:
+                tracks_text = "none"
+
+            bitrate_text = f"{bitrate_kbps}kbps" if bitrate_kbps is not None else "unknown"
+            size_text = format_size(p.stat().st_size)
+            print(
+                f"{p} | bitrate={bitrate_text} | audio_tracks={len(audio_channels)} ({tracks_text}) | size={size_text}"
+            )
 
 
 if __name__ == "__main__":
@@ -92,18 +119,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--bitrate",
         type=int,
-        help="Override max video bitrate (kbps)"
+        default=MAX_BR,
+        help="Max allowed bitrate in kbps"
     )
     parser.add_argument("dir", nargs="?", default=".", help="Directory to scan recursively")
-   
-    root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").expanduser().resolve()
-    
-    if args.bitrate:
-        MAX_BR = args.bitrate
-        TARGET_BR = MAX_BR - BITRATE_TOLERANCE
+
+    args = parser.parse_args()
+    root = Path(args.dir).expanduser().resolve()
 
     if not root.is_dir():
         print(f"Not a directory: {root}")
         sys.exit(1)
 
-    scan(root)
+    scan(root, args.bitrate)
