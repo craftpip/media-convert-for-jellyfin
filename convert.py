@@ -513,7 +513,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--bitrate",
         type=int,
-        help="Override max video bitrate (kbps)"
+        help="Set target video bitrate (kbps); max bitrate becomes target + 1000 kbps"
     )
     parser.add_argument(
         "--crf",
@@ -530,8 +530,8 @@ if __name__ == "__main__":
     setup_logging(log_path, args.verbose)
 
     if args.bitrate:
-        MAX_BR = args.bitrate
-        TARGET_BR = MAX_BR - BITRATE_TOLERANCE
+        TARGET_BR = args.bitrate
+        MAX_BR = TARGET_BR + 1000
         BUFSIZE = MAX_BR * 2
 
     crf = args.crf if args.crf else None
