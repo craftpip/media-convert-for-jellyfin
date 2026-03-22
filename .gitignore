@@ -5,3 +5,4 @@
 done.txt
 __pycache__/
 size-report.csv
+venv/

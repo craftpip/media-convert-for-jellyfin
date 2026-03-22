@@ -169,6 +169,72 @@ def resolve_transcoder(use_value: str):
     return False, f"unknown_transcoder({requested}); valid profiles: {supported}"
 
 
+# ---------------------------------------------------------------------------
+# Remote mode helpers
+# ---------------------------------------------------------------------------
+
+def parse_remote_target(remote: str) -> tuple[str, str]:
+    """Parse 'user@host:/path' into (host, remote_dir)."""
+    if ":" not in remote:
+        raise ValueError("Remote must be in format user@host:/path")
+    host, remote_dir = remote.split(":", 1)
+    return host, remote_dir
+
+
+def ssh_run(host: str, cmd: str, timeout: int = 30) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["ssh", "-o", "ConnectTimeout=10", host, cmd],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def scp_upload(local: Path, remote_dest: str, timeout: int = 600) -> bool:
+    r = subprocess.run(
+        ["scp", "-o", "ConnectTimeout=10", str(local), remote_dest],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    return r.returncode == 0
+
+
+def scp_download(remote_src: str, local_dest: Path, timeout: int = 600) -> bool:
+    r = subprocess.run(
+        ["scp", "-o", "ConnectTimeout=10", remote_src, str(local_dest)],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    return r.returncode == 0
+
+
+def ssh_mkdir(host: str, remote_dir: str) -> bool:
+    r = ssh_run(host, f"mkdir -p '{remote_dir}'")
+    return r.returncode == 0
+
+
+def ssh_ls(host: str, remote_dir: str) -> bool:
+    r = ssh_run(host, f"ls -1 '{remote_dir}'")
+    return r.returncode == 0
+
+
+def list_remote_videos(host: str, remote_dir: str) -> list[str]:
+    """List video files on remote via SSH find."""
+    ext_pattern = " -o ".join(f'-name "*{ext}"' for ext in VIDEO_EXTS)
+    cmd = f"find '{remote_dir}' -type f \\( {ext_pattern} \\) | sort"
+    r = ssh_run(host, cmd, timeout=120)
+    if r.returncode != 0:
+        return []
+    files = [line.strip() for line in r.stdout.splitlines() if line.strip()]
+    return [f for f in files if TMP_TAG not in f]
+
+
+def remote_file_size(host: str, remote_path: str) -> int | None:
+    r = ssh_run(host, f"stat -c%s '{remote_path}'")
+    if r.returncode == 0:
+        try:
+            return int(r.stdout.strip())
+        except ValueError:
+            pass
+    return None
+
+
 def load_done() -> dict[str, str]:
     if not DONE_FILE.exists():
         return {}
@@ -508,6 +574,94 @@ def main(scan_dir: str, crf: int | None = None):
     log.info(f"Done. OK={ok} SKIP={skip} FAIL={fail}")
 
 
+def main_remote(host: str, remote_dir: str, local_tmp: Path, crf: int | None = None):
+    """Remote mode: download each file, convert locally with GPU, upload back."""
+    local_tmp.mkdir(parents=True, exist_ok=True)
+
+    if not ssh_ls(host, remote_dir):
+        log.error(f"FATAL: remote path not accessible: {host}:{remote_dir}")
+        return
+
+    done = load_done()
+    files = list_remote_videos(host, remote_dir)
+    total = len(files)
+    log.info(f"Remote scan: {total} file(s) on {host}:{remote_dir}")
+
+    ok = skip = fail = 0
+    size_rows: list[tuple[str, int, int]] = []
+
+    for i, remote_file in enumerate(files, 1):
+        current_opt = f"crf:{crf}" if crf else f"br:{TARGET_BR}"
+        key = f"{remote_file}|{current_opt}"
+
+        if done.get(remote_file) == current_opt:
+            skip += 1
+            log.info(f"[{i}/{total}] SKIP: {remote_file} :: already_done")
+            continue
+
+        local_file = local_tmp / Path(remote_file).name
+        local_tmp_conv = tmp_name_for(local_file)
+
+        log.info(f"[{i}/{total}] Downloading: {remote_file}")
+        if not scp_download(f"{host}:{remote_file}", local_file):
+            fail += 1
+            log.error(f"[{i}/{total}] FAIL: {remote_file} :: download_failed")
+            continue
+
+        log.info(f"[{i}/{total}] Checking: {local_file}")
+        status, msg, size_row = convert_if_needed(local_file, crf)
+
+        if status == "OK":
+            remote_dest_dir = str(Path(remote_file).parent)
+            ssh_mkdir(host, remote_dest_dir)
+
+            log.info(f"[{i}/{total}] Uploading converted file...")
+            if scp_upload(local_file, f"{host}:{remote_file}"):
+                ok += 1
+                done[remote_file] = current_opt
+                save_done(done)
+                if size_row:
+                    size_rows.append((Path(remote_file).name, size_row[1], size_row[2]))
+                log.info(f"[{i}/{total}] OK: {remote_file} :: {msg}")
+            else:
+                fail += 1
+                log.error(f"[{i}/{total}] FAIL: {remote_file} :: upload_failed")
+
+            # cleanup local temp files
+            try:
+                local_file.unlink()
+            except Exception:
+                pass
+            if local_tmp_conv.exists():
+                try:
+                    local_tmp_conv.unlink()
+                except Exception:
+                    pass
+
+        elif status == "SKIP":
+            skip += 1
+            log.info(f"[{i}/{total}] SKIP: {remote_file} :: {msg}")
+            try:
+                local_file.unlink()
+            except Exception:
+                pass
+        else:
+            fail += 1
+            log.error(f"[{i}/{total}] FAIL: {remote_file} :: {msg}")
+            try:
+                local_file.unlink()
+            except Exception:
+                pass
+            if local_tmp_conv.exists():
+                try:
+                    local_tmp_conv.unlink()
+                except Exception:
+                    pass
+
+    append_size_report(size_rows)
+    log.info(f"Done. OK={ok} SKIP={skip} FAIL={fail}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -521,6 +675,8 @@ if __name__ == "__main__":
         help="Use CRF mode with this value (lower = better quality, 23 is default)"
     )
     parser.add_argument("dir", nargs="?", default=".", help="Directory to scan recursively")
+    parser.add_argument("--remote", default="", help="Remote target: user@host:/path")
+    parser.add_argument("--local-tmp", default="", help="Local temp dir for remote mode (default: /tmp/convert-remote)")
     parser.add_argument("--log-file", default="", help="Path to log file (optional)")
     parser.add_argument("--use", default="nvidia", help="Transcoder profile or ffmpeg encoder name")
     parser.add_argument("--verbose", action="store_true", help="More logs (debug)")
@@ -547,10 +703,21 @@ if __name__ == "__main__":
 
     print(f"Using transcoder: {TRANSCODER} (profile: {TRANSCODER_PROFILE})")
 
-    try:
-        main(args.dir, crf)
-    except KeyboardInterrupt as e:
-        print(f"\nError: {str(e)}")
-    except Exception as e:
-        print(f"\nError: {str(e)}")
-        log.exception("Unhandled exception")
+    if args.remote:
+        host, remote_dir = parse_remote_target(args.remote)
+        local_tmp = Path(args.local_tmp).expanduser().resolve() if args.local_tmp else Path("/tmp/convert-remote")
+        try:
+            main_remote(host, remote_dir, local_tmp, crf)
+        except KeyboardInterrupt as e:
+            print(f"\nError: {str(e)}")
+        except Exception as e:
+            print(f"\nError: {str(e)}")
+            log.exception("Unhandled exception")
+    else:
+        try:
+            main(args.dir, crf)
+        except KeyboardInterrupt as e:
+            print(f"\nError: {str(e)}")
+        except Exception as e:
+            print(f"\nError: {str(e)}")
+            log.exception("Unhandled exception")
