@@ -385,7 +385,7 @@ def safe_replace(src: Path, dst: Path):
     return False
 
 
-def build_ffmpeg_cmd(in_file: Path, out_file: Path, crf: int | None = None):
+def build_ffmpeg_cmd(in_file: Path, out_file: Path, crf: int | None = None, verbose: bool = False):
     ext = in_file.suffix.lower()
 
     streams = probe_streams(in_file)
@@ -412,8 +412,9 @@ def build_ffmpeg_cmd(in_file: Path, out_file: Path, crf: int | None = None):
                 maps += ["-map", f"0:{idx}"]
         sub_mode = "mov_text"
 
+    loglevel = "info" if verbose else "error"
     cmd = [
-        FFMPEG_CMD, "-hide_banner", "-loglevel", "error", "-y",
+        FFMPEG_CMD, "-hide_banner", "-loglevel", loglevel, "-y",
         "-i", str(in_file),
         *maps,
     ]
@@ -459,7 +460,7 @@ def build_ffmpeg_cmd(in_file: Path, out_file: Path, crf: int | None = None):
     return cmd, None
 
 
-def convert_if_needed(file: Path, crf: int | None = None):
+def convert_if_needed(file: Path, crf: int | None = None, verbose: bool = False):
     ext = file.suffix.lower()
 
     if ext not in H264_OK_CONTAINERS:
@@ -483,7 +484,7 @@ def convert_if_needed(file: Path, crf: int | None = None):
         except Exception:
             return "FAIL", "tmp_cleanup_failed", None
 
-    cmd, err = build_ffmpeg_cmd(file, tmp, crf)
+    cmd, err = build_ffmpeg_cmd(file, tmp, crf, verbose)
     if err:
         return "FAIL", err, None
     if not cmd:
@@ -492,9 +493,14 @@ def convert_if_needed(file: Path, crf: int | None = None):
         log.info(f"Command: {' '.join(cmd)}")
 
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        if verbose:
+            r = subprocess.run(cmd, check=True)
+        else:
+            r = subprocess.run(cmd, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as e:
-        return "FAIL", f"ffmpeg_failed: {e.stderr}", None
+        if hasattr(e, 'stderr') and e.stderr:
+            return "FAIL", f"ffmpeg_failed: {e.stderr}", None
+        return "FAIL", f"ffmpeg_failed: exit_code={e.returncode}", None
     if not tmp.exists() or tmp.stat().st_size == 0:
         try:
             if tmp.exists():
@@ -519,7 +525,7 @@ def convert_if_needed(file: Path, crf: int | None = None):
     return "OK", mode, (file.name, before_size, after_size)
 
 
-def main(scan_dir: str, crf: int | None = None):
+def main(scan_dir: str, crf: int | None = None, verbose: bool = False):
     if not resolve_ffmpeg_tools():
         log.error("FATAL: ffmpeg/ffprobe not found in PATH")
         return
@@ -555,7 +561,7 @@ def main(scan_dir: str, crf: int | None = None):
             continue
 
         log.info(f"[{i}/{total}] Checking: {f}")
-        status, msg, size_row = convert_if_needed(f, crf)
+        status, msg, size_row = convert_if_needed(f, crf, verbose)
         if status == "OK":
             ok += 1
             done[path] = current_opt
@@ -574,7 +580,7 @@ def main(scan_dir: str, crf: int | None = None):
     log.info(f"Done. OK={ok} SKIP={skip} FAIL={fail}")
 
 
-def main_remote(host: str, remote_dir: str, local_tmp: Path, crf: int | None = None):
+def main_remote(host: str, remote_dir: str, local_tmp: Path, crf: int | None = None, verbose: bool = False):
     """Remote mode: download each file, convert locally with GPU, upload back."""
     local_tmp.mkdir(parents=True, exist_ok=True)
 
@@ -609,7 +615,7 @@ def main_remote(host: str, remote_dir: str, local_tmp: Path, crf: int | None = N
             continue
 
         log.info(f"[{i}/{total}] Checking: {local_file}")
-        status, msg, size_row = convert_if_needed(local_file, crf)
+        status, msg, size_row = convert_if_needed(local_file, crf, verbose)
 
         if status == "OK":
             remote_dest_dir = str(Path(remote_file).parent)
@@ -707,7 +713,7 @@ if __name__ == "__main__":
         host, remote_dir = parse_remote_target(args.remote)
         local_tmp = Path(args.local_tmp).expanduser().resolve() if args.local_tmp else Path("/tmp/convert-remote")
         try:
-            main_remote(host, remote_dir, local_tmp, crf)
+            main_remote(host, remote_dir, local_tmp, crf, args.verbose)
         except KeyboardInterrupt as e:
             print(f"\nError: {str(e)}")
         except Exception as e:
@@ -715,7 +721,7 @@ if __name__ == "__main__":
             log.exception("Unhandled exception")
     else:
         try:
-            main(args.dir, crf)
+            main(args.dir, crf, args.verbose)
         except KeyboardInterrupt as e:
             print(f"\nError: {str(e)}")
         except Exception as e:
