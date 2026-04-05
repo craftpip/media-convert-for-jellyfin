@@ -35,6 +35,18 @@ ALLOWED_AUDIO_LANGS = {
     "hin", "hi", "hindi",
 }
 
+# Codecs supported by each profile's hardware decoder (common codecs across most GPUs)
+CUDA_DECODABLE_CODECS = {"h264", "hevc", "vp9", "mpeg1video", "mpeg2video", "vc1"}
+QSV_DECODABLE_CODECS = {"h264", "hevc", "vp9", "mpeg2video", "vc1"}
+VAAPI_DECODABLE_CODECS = {"h264", "hevc", "vp9", "mpeg2video", "vc1"}
+
+HWACCEL_DECODABLE = {
+    "nvidia": CUDA_DECODABLE_CODECS,
+    "intel": QSV_DECODABLE_CODECS,
+    "amdgpu": VAAPI_DECODABLE_CODECS,
+    "vaapi": VAAPI_DECODABLE_CODECS,
+}
+
 log = logging.getLogger("transcode")
 
 TRANSCODER_ALIASES = {
@@ -354,6 +366,16 @@ def probe_streams(file):
     return vids, auds, subs
 
 
+def probe_video_codec(file) -> str | None:
+    data = ffprobe_json(file, "stream=index,codec_type,codec_name")
+    if not data or "streams" not in data:
+        return None
+    for s in data["streams"]:
+        if s.get("codec_type") == "video":
+            return (s.get("codec_name") or "").lower() or None
+    return None
+
+
 def tmp_name_for(file: Path) -> Path:
     return file.with_name(file.stem + TMP_TAG + file.suffix)
 
@@ -413,8 +435,26 @@ def build_ffmpeg_cmd(in_file: Path, out_file: Path, crf: int | None = None, verb
         sub_mode = "mov_text"
 
     loglevel = "info" if verbose else "error"
+
+    video_codec = probe_video_codec(in_file)
+    supported_codecs = HWACCEL_DECODABLE.get(TRANSCODER_PROFILE)
+
+    hwaccel_args: list[str] = []
+    if video_codec and supported_codecs and video_codec not in supported_codecs:
+        log.info(f"Video codec '{video_codec}' not supported by {TRANSCODER_PROFILE} hw decoder, using software decoding")
+    elif TRANSCODER_PROFILE == "nvidia":
+        hwaccel_args = ["-hwaccel", "cuda"]
+    elif TRANSCODER_PROFILE == "intel":
+        hwaccel_args = ["-hwaccel", "qsv"]
+    elif TRANSCODER_PROFILE == "amdgpu":
+        hwaccel_args = ["-hwaccel", "vaapi"]
+    elif TRANSCODER_PROFILE == "vaapi" or TRANSCODER.endswith("_vaapi"):
+        hwaccel_args = ["-hwaccel", "vaapi"]
+    # cpu: no hwaccel (software decoding)
+
     cmd = [
         FFMPEG_CMD, "-hide_banner", "-loglevel", loglevel, "-y",
+        *hwaccel_args,
         "-i", str(in_file),
         *maps,
     ]
